@@ -1,5 +1,5 @@
 # train_supervisor.py  --  Gemma 4 E2B Security Supervisor Fine-Tuning
-#
+# Binary classifier: assistant completion is {"decision": "PASS"|"BLOCK"} only.
 # Cell 1 (Kaggle):
 #   !pip install "unsloth[kaggle-new] @ git+https://github.com/unslothai/unsloth.git" -q
 #   !pip install trl==0.19.1 gguf -q
@@ -226,7 +226,7 @@ def main() -> None:
     # Sanity check: abort early if response_template is not found in first example
     out = collator([raw_tok(ds[0]["text"])])
     n   = (out["labels"] != -100).sum().item()
-    log.info("Supervised tokens in first example: %d", n)
+    log.info("Supervised tokens in first example: %d (expect ~8-15 for JSON-only classifier)", n)
     if n == 0:
         raise ValueError(
             "0 supervised tokens — response_template IDs not found in tokenized input.\n"

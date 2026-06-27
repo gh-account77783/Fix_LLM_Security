@@ -1,8 +1,5 @@
-# train_supervisor_smoketest.py  --  Smoke-test: 50 examples, 3 epochs, verbose loss
-#
-# PURPOSE: Verify the training loop is healthy (no NaN loss, template found,
-#          loss is actually decreasing) before committing to the full ~60-80 min run.
-#
+# train_supervisor_smoketest.py  --  Smoke-test before full Kaggle run
+# Binary classifier: assistant completion is {"decision": "PASS"|"BLOCK"} only.
 # Cell 1 (Kaggle):
 #   !pip install "unsloth[kaggle-new] @ git+https://github.com/unslothai/unsloth.git" -q
 #   !pip install trl==0.19.1 gguf -q
@@ -153,7 +150,7 @@ def main() -> None:
     # Smoke-test knobs
     # -----------------------------------------------------------------------
     N_EXAMPLES = 300         # number of training examples to use
-    N_EPOCHS   = 1          # epochs over those 50 examples
+    N_EPOCHS   = 1           # epochs over those examples
     LOG_STEPS  = 1         # log loss every step (verbose — we want to see all loss values)
     # -----------------------------------------------------------------------
 
@@ -277,7 +274,7 @@ def main() -> None:
     # Sanity check: abort early if response_template is not found in first example
     out = collator([raw_tok(smoke_ds[0]["text"])])
     n   = (out["labels"] != -100).sum().item()
-    log.info("Supervised tokens in first example: %d", n)
+    log.info("Supervised tokens in first example: %d (expect ~8-15 for JSON-only classifier)", n)
     if n == 0:
         raise ValueError(
             "0 supervised tokens — response_template IDs not found in tokenized input.\n"
