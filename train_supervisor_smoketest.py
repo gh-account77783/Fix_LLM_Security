@@ -95,20 +95,19 @@ def gguf_staging_dir(name: str) -> str:
 
 
 def free_disk_before_gguf() -> None:
-    """Reclaim /kaggle/working space before GGUF export."""
+    """Reclaim disk space before GGUF export by scrubbing /tmp of orphaned directories. Remove previous /temp files"""
     if not is_kaggle():
         return
-    for d in (
-        "smoketest_gguf_out", "smoketest_gguf_out_gguf",
-        "gguf_out", "gguf_out_gguf",
-    ):
-        shutil.rmtree(d, ignore_errors=True)
-    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
-    if hf_hub.is_dir():
-        for entry in hf_hub.iterdir():
-            if entry.name.startswith("models--"):
-                shutil.rmtree(entry, ignore_errors=True)
-        log.info("Cleared HuggingFace hub cache to free /kaggle/working disk.")
+    log.info("Scrubbing /tmp for orphaned directories...")
+    # Clear old failed runs in /tmp
+    for p in Path("/tmp").glob("*"):
+        try:
+            if p.is_dir() and ("gguf" in p.name or "lora" in p.name):
+                shutil.rmtree(p, ignore_errors=True)
+        except Exception:
+            pass
+
+    log.info("Temporary directories cleared ✓")
 
 
 def find_gguf_export(staging_dir: str) -> "Path | None":
@@ -151,7 +150,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     N_EXAMPLES = 300         # number of training examples to use
     N_EPOCHS   = 1           # epochs over those examples
-    LOG_STEPS  = 1         # log loss every step (verbose — we want to see all loss values)
+    LOG_STEPS  = 10         # log loss every 10 steps (averages the loss of 10 examples)
     # -----------------------------------------------------------------------
 
     MODEL   = "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit"
@@ -197,7 +196,7 @@ def main() -> None:
     eval_ds = None
     if eval_file:
         raw_eval = load_dataset("json", data_files=eval_file, split="train")
-        eval_ds  = raw_eval.shuffle(seed=99).select(range(min(10, len(raw_eval))))
+        eval_ds  = raw_eval.shuffle(seed=99).select(range(min(100, len(raw_eval))))
         eval_ds  = eval_ds.map(fmt, batched=True)
         eval_ds  = eval_ds.remove_columns([c for c in eval_ds.column_names if c != "text"])
         log.info("Smoke-test eval dataset: %d examples", len(eval_ds))
@@ -288,7 +287,7 @@ def main() -> None:
     #   immediately, keeping eval memory near-zero.
     # eval_accumulation_steps=1  — process eval one example at a time instead of
     #   accumulating tensors across the whole eval set before releasing them.
-    _eval_steps = max(1, N_EXAMPLES // 6)   # fires ~6 times per run regardless of N_EXAMPLES
+    _eval_steps = 10   # fires every 10 steps
     eval_kw = (
         {"eval_strategy": "steps", "eval_steps": _eval_steps,
          "prediction_loss_only": True, "eval_accumulation_steps": 1}

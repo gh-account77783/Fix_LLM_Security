@@ -37,7 +37,7 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 
 # Security Guard Supervisor: Default to local Ollama
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://localhost:11434")
-SUPERVISOR_MODEL = os.getenv("SUPERVISOR_MODEL", "supervisor-smoketest:latest")
+SUPERVISOR_MODEL = os.getenv("SUPERVISOR_MODEL", "supervisor-proxy:latest")
 
 # Upstream LLM providers: Default OpenAI to local Ollama (since it routes to cloud models)
 UPSTREAM_OPENAI_URL = os.getenv("UPSTREAM_OPENAI_URL", "http://localhost:11434")
@@ -57,9 +57,14 @@ logger.info(f" -> Supervisor Model: {SUPERVISOR_MODEL} @ {SUPERVISOR_URL}")
 logger.info(f" -> Upstream OpenAI: {UPSTREAM_OPENAI_URL}")
 logger.info(f" -> Upstream Anthropic: {UPSTREAM_ANTHROPIC_URL}")
 
-def format_tool_call(name: str, arguments: dict) -> str:
+def format_tool_call(name: str, arguments) -> str:
     """Format tool name and args into Python-like function signature representation."""
-    args_str = ", ".join(f"{k}={repr(v)}" for k, v in arguments.items())
+    if isinstance(arguments, dict):
+        args_str = ", ".join(f"{k}={repr(v)}" for k, v in arguments.items())
+    elif isinstance(arguments, list):
+        args_str = ", ".join(repr(v) for v in arguments)
+    else:
+        args_str = repr(arguments)
     return f"{name}({args_str})"
 
 async def check_action_with_supervisor(user_rule: str, agent_state: str, proposed_action: str) -> str:

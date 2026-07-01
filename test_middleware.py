@@ -6,6 +6,7 @@ import urllib.request
 import urllib.error
 
 MIDDLEWARE_URL = "http://localhost:8080"
+EVAL_FILE = "supervisor_eval.jsonl"
 
 # Load .env file manually for zero-dependency consistency
 env_path = ".env"
@@ -19,8 +20,6 @@ if os.path.exists(env_path):
 
 # Check middleware state
 MOCK_UPSTREAM = os.getenv("MOCK_UPSTREAM", "False").lower() in ("true", "1", "yes")
-
-# Determine which model to request (gemma4:31b is the cloud model name on Ollama registry)
 OPENAI_TEST_MODEL = "gpt-mock" if MOCK_UPSTREAM else os.getenv("OPENAI_TEST_MODEL", "gemma4:31b")
 
 # Standard OpenAI tool schemas
@@ -81,11 +80,11 @@ def test_endpoint(path: str, headers: dict, payload: dict, expected_status: int)
     )
     
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             status_code = resp.status
-            body = json.loads(resp.read().decode("utf-8"))
+            body_text = resp.read().decode("utf-8")
             passed = (status_code == expected_status)
-            return passed, status_code, str(body)[:150]
+            return passed, status_code, body_text
     except urllib.error.HTTPError as e:
         status_code = e.code
         body_text = e.read().decode("utf-8")
@@ -94,17 +93,13 @@ def test_endpoint(path: str, headers: dict, payload: dict, expected_status: int)
     except Exception as e:
         return False, 500, f"Error: {e}"
 
-def main():
-    print(f"=== STARTING REAL-MODEL MIDDLEWARE INTEGRATION TESTS ===")
+def run_manual_tests():
+    print(f"=== RUNNING MANUAL INTEGRATION TESTS ===")
     print(f"Targeting Upstream: {OPENAI_TEST_MODEL} | MOCK_UPSTREAM={MOCK_UPSTREAM}")
-
-    openai_key = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-    if not openai_key:
-        print("Warning: OLLAMA_API_KEY/OPENAI_API_KEY not found in env. Upstream cloud calls may fail.", file=sys.stderr)
     
+    openai_key = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     auth_header = f"Bearer {openai_key.strip()}" if openai_key else "Bearer mock-key"
 
-    # Define OpenAI test cases prompting the model to invoke specific tools
     openai_tests = [
         {
             "name": "OpenAI Benign 1: Read README (Expected: 200 PASS)",
@@ -228,8 +223,7 @@ def main():
         }
     ]
 
-    print(f"Loaded {len(openai_tests)} test cases.\n")
-
+    print(f"Loaded {len(openai_tests)} manual test cases.\n")
     passed_count = 0
     failed_count = 0
 
@@ -238,7 +232,6 @@ def main():
 
     for i, test in enumerate(openai_tests, 1):
         passed, status_code, response_body = test_endpoint(test["path"], test["headers"], test["payload"], test["expected_status"])
-        
         match_str = "[OK]" if passed else "[FAIL]"
         if passed:
             passed_count += 1
@@ -250,15 +243,125 @@ def main():
             print(f"     +- Expected HTTP {test['expected_status']}, but received HTTP {status_code}. Response: {response_body[:120]}")
 
     print("-" * 90)
-    print(f"=== TESTS COMPLETE ===")
-    print(f"Passed: {passed_count} / {len(openai_tests)} ({passed_count/len(openai_tests)*100:.1f}%)")
-    print(f"Failed: {failed_count} / {len(openai_tests)}")
+    print(f"Manual Tests passed: {passed_count} / {len(openai_tests)} ({passed_count/len(openai_tests)*100:.1f}%)")
+    return failed_count == 0
 
-    if failed_count > 0:
-        # Exit with non-zero if tests failed (so user/CI knows)
-        sys.exit(1)
+def run_dataset_tests(limit: int = None): #taking all evals
+    print(f"\n=== RUNNING {'ALL' if limit is None else limit} DATASET TESTS FROM {EVAL_FILE} ===")
+    if not os.path.exists(EVAL_FILE):
+        print(f"Error: {EVAL_FILE} not found. Please place it in the root directory.", file=sys.stderr)
+        return False
+        
+    import random
+    all_records = []
+    with open(EVAL_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                all_records.append(json.loads(line))
+                
+    if limit is not None and len(all_records) > limit:
+        # Take a random sample of size `limit`
+        records = random.sample(all_records, limit)
     else:
+        records = all_records
+                    
+    passed_count = 0
+    failed_count = 0
+    
+    matrix = {"BLOCK": {"BLOCK": 0, "PASS": 0, "PARSE_FAIL": 0},
+              "PASS":  {"BLOCK": 0, "PASS": 0, "PARSE_FAIL": 0}}
+              
+    print(f"{'No.':<4} | {'Expected':<8} | {'Status':<6} | {'Match?':<6} | {'Test Scenario Summary'}")
+    print("-" * 90)
+    
+    for i, rec in enumerate(records, 1):
+        expected = rec.get("decision", "PASS")
+        prompt = rec.get("prompt", "")
+        expected_status = 403 if expected == "BLOCK" else 200
+        
+        # Extract a short summary of the scenario for logs
+        summary = "Dataset Case"
+        pref_match = re.search(r"\[USER_PREFERENCES\]\n(.*?)\n", prompt)
+        action_match = re.search(r"\[PROPOSED_ACTION\]\n(.*?)$", prompt, re.DOTALL)
+        if pref_match and action_match:
+            summary = f"Rule: {pref_match.group(1)[:30]}... | Action: {action_match.group(1).strip()[:35]}..."
+            
+        payload = {
+            "model": "gpt-mock",
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [],
+            "tool_choice": "none"
+        }
+        
+        # Send Bearer mock-key to ensure mock responder returns the dynamic tool call
+        headers = {"authorization": "Bearer mock-key"}
+        passed, status_code, body = test_endpoint("/v1/chat/completions", headers, payload, expected_status)
+        
+        pred = "PASS"
+        if status_code == 403:
+            pred = "BLOCK"
+        elif status_code != 200:
+            pred = "PARSE_FAIL"
+            
+        matrix[expected][pred] += 1
+        
+        match_str = "[OK]" if passed else "[FAIL]"
+        if passed:
+            passed_count += 1
+        else:
+            failed_count += 1
+            
+        print(f"{i:<4} | {expected:<8} | {status_code:<6} | {match_str:<6} | {summary}")
+        if not passed:
+            print(f"     +- Mismatch: Expected {expected} (HTTP {expected_status}), but received {pred} (HTTP {status_code})")
+            
+    print("-" * 90)
+    print("CONFUSION MATRIX (Dataset Evaluation)")
+    print("-" * 90)
+    print(f"{'':12} | {'pred BLOCK':>12} | {'pred PASS':>12} | {'PARSE_FAIL':>12}")
+    print("-" * 90)
+    print(f"{'exp BLOCK':12} | {matrix['BLOCK']['BLOCK']:12} | {matrix['BLOCK']['PASS']:12} | {matrix['BLOCK']['PARSE_FAIL']:12}")
+    print(f"{'exp PASS':12} | {matrix['PASS']['BLOCK']:12} | {matrix['PASS']['PASS']:12} | {matrix['PASS']['PARSE_FAIL']:12}")
+    print("-" * 90)
+    
+    tp = matrix["BLOCK"]["BLOCK"]
+    fn = matrix["BLOCK"]["PASS"]
+    fp = matrix["PASS"]["BLOCK"]
+    tn = matrix["PASS"]["PASS"]
+    
+    total_cases = len(records)
+    accuracy = (tp + tn) / total_cases if total_cases else 0
+    precision = tp / (tp + fp) if (tp + fp) else 0
+    recall = tp / (tp + fn) if (tp + fn) else 0
+    f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) else 0
+    
+    print(f"Total Dataset Cases: {total_cases}")
+    print(f"Passed:              {passed_count} / {total_cases} ({passed_count/total_cases*100:.1f}%)" if total_cases else "Passed: 0/0")
+    print(f"Failed:              {failed_count} / {total_cases}")
+    print(f"Accuracy:            {accuracy*100:.1f}%")
+    print(f"Precision (BLOCK):   {precision*100:.1f}%")
+    print(f"Recall (BLOCK):      {recall*100:.1f}%")
+    print(f"F1 Score (BLOCK):    {f1*100:.1f}%")
+    
+    return failed_count == 0
+
+def main():
+    print("=" * 90)
+    print("SECURITY SUPERVISOR MIDDLEWARE INTERCEPT TEST RUNNER")
+    print("=" * 90)
+    
+    # 1. Run the manual integration test suite
+    manual_success = run_manual_tests()
+    
+    # 2. Run the dataset evaluation suite with all examples
+    dataset_success = run_dataset_tests()
+    
+    if manual_success and dataset_success:
+        print("\n[SUCCESS] All test suites completed successfully!")
         sys.exit(0)
+    else:
+        print("\n[FAIL] Some test cases failed. See details above.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -83,17 +83,19 @@ def gguf_staging_dir(name: str) -> str:
 
 
 def free_disk_before_gguf() -> None:
-    """Reclaim /kaggle/working space before GGUF export."""
+    """Reclaim disk space before GGUF export by scrubbing /tmp of orphaned directories."""
     if not is_kaggle():
         return
-    for d in ("gguf_out", "gguf_out_gguf", "smoketest_gguf_out", "smoketest_gguf_out_gguf"):
-        shutil.rmtree(d, ignore_errors=True)
-    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
-    if hf_hub.is_dir():
-        for entry in hf_hub.iterdir():
-            if entry.name.startswith("models--"):
-                shutil.rmtree(entry, ignore_errors=True)
-        log.info("Cleared HuggingFace hub cache to free /kaggle/working disk.")
+    log.info("Scrubbing /tmp for orphaned directories...")
+    # Clear old failed runs in /tmp
+    for p in Path("/tmp").glob("*"):
+        try:
+            if p.is_dir() and ("gguf" in p.name or "lora" in p.name):
+                shutil.rmtree(p, ignore_errors=True)
+        except Exception:
+            pass
+
+    log.info("Temporary directories cleared ✓")
 
 
 def find_gguf_export(staging_dir: str) -> "Path | None":
@@ -167,8 +169,10 @@ def main() -> None:
     ds   = ds.remove_columns([c for c in ds.column_names if c != "text"])
     eval_ds = None
     if eval_file:
-        eval_ds = load_dataset("json", data_files=eval_file, split="train").map(fmt, batched=True)
-        eval_ds = eval_ds.remove_columns([c for c in eval_ds.column_names if c != "text"])
+        raw_eval = load_dataset("json", data_files=eval_file, split="train")
+        eval_ds  = raw_eval.shuffle(seed=99).select(range(min(200, len(raw_eval)))) # evaluate with 200 examples
+        eval_ds  = eval_ds.map(fmt, batched=True)
+        eval_ds  = eval_ds.remove_columns([c for c in eval_ds.column_names if c != "text"])
 
     # --- Collator ---
     # packing=False is mandatory — packing + DataCollatorForCompletionOnlyLM -> ValueError
@@ -238,7 +242,7 @@ def main() -> None:
     # logits in fp32 (vocab_size x seq_len x batch), which OOMs on a 14 GB T4.
     # eval_accumulation_steps=1  — releases eval tensors after each example.
     eval_kw = (
-        {"eval_strategy": "steps", "eval_steps": 50,
+        {"eval_strategy": "steps", "eval_steps": 10,
          "prediction_loss_only": True, "eval_accumulation_steps": 1}
         if eval_ds else {}
     )
