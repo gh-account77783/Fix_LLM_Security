@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Configure logging
@@ -46,6 +46,7 @@ UPSTREAM_OPENAI_URL = os.getenv("UPSTREAM_OPENAI_URL", "http://localhost:11434")
 UPSTREAM_ANTHROPIC_URL = os.getenv("UPSTREAM_ANTHROPIC_URL", "https://api.anthropic.com")
 
 MOCK_UPSTREAM = os.getenv("MOCK_UPSTREAM", "False").lower() in ("true", "1", "yes")
+UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120"))
 
 DECISION_RE = re.compile(r'\{"decision"\s*:\s*"(BLOCK|PASS)"\}', re.IGNORECASE)
 SYSTEM_PROMPT = (
@@ -68,6 +69,87 @@ def format_tool_call(name: str, arguments) -> str:
     else:
         args_str = repr(arguments)
     return f"{name}({args_str})"
+
+def extract_anthropic_stream_tool_calls(sse_body: str) -> list[tuple[str, dict]]:
+    """Reconstruct tool calls from a buffered Anthropic SSE response.
+
+    Claude Code requests streamed responses.  Tool inputs can arrive across a
+    ``content_block_start`` event and several ``input_json_delta`` events, so
+    they must be reassembled before the supervisor can inspect them.
+    """
+    blocks: dict[int, dict] = {}
+    data_lines: list[str] = []
+
+    def process_event() -> None:
+        if not data_lines:
+            return
+        try:
+            event = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            logger.warning("Could not parse an event in upstream Anthropic stream")
+            return
+
+        event_type = event.get("type")
+        index = event.get("index")
+        if event_type == "content_block_start":
+            content_block = event.get("content_block", {})
+            if content_block.get("type") == "tool_use" and isinstance(index, int):
+                blocks[index] = {
+                    "name": content_block.get("name", ""),
+                    "input": content_block.get("input", {}),
+                    "partial_json": "",
+                }
+        elif event_type == "content_block_delta" and isinstance(index, int):
+            delta = event.get("delta", {})
+            if delta.get("type") == "input_json_delta" and index in blocks:
+                blocks[index]["partial_json"] += delta.get("partial_json", "")
+
+    for line in sse_body.splitlines():
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+        elif not line.strip():
+            process_event()
+            data_lines = []
+    process_event()
+
+    tool_calls: list[tuple[str, dict]] = []
+    for block in blocks.values():
+        tool_input = block["input"]
+        if block["partial_json"]:
+            try:
+                tool_input = json.loads(block["partial_json"])
+            except json.JSONDecodeError:
+                tool_input = {"raw_arguments": block["partial_json"]}
+        if not isinstance(tool_input, dict):
+            tool_input = {"raw_arguments": tool_input}
+        tool_calls.append((block["name"], tool_input))
+    return tool_calls
+
+async def checked_anthropic_stream(
+    sse_body: bytes,
+    content_type: str,
+    user_rule: str,
+    agent_state: str,
+):
+    """Return a stream only after every proposed Anthropic tool call passes."""
+    for tool_name, tool_input in extract_anthropic_stream_tool_calls(sse_body.decode("utf-8", errors="replace")):
+        proposed_action = format_tool_call(tool_name, tool_input)
+        logger.info(f"Intercepted streamed tool call: {proposed_action}")
+        decision = await check_action_with_supervisor(user_rule, agent_state, proposed_action)
+        logger.info(f"Supervisor decision: {decision}")
+        if decision == "BLOCK":
+            err_response = {
+                "type": "error",
+                "error": {
+                    "type": "permission_error",
+                    "message": f"Action blocked by security supervisor: {proposed_action}",
+                },
+            }
+            return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content=err_response)
+
+    # Buffering is intentional: no part of a tool call is released before it
+    # has been approved.  The original SSE body remains unchanged for Claude.
+    return StreamingResponse(iter([sse_body]), headers={"content-type": content_type})
 
 async def check_action_with_supervisor(user_rule: str, agent_state: str, proposed_action: str) -> str:
     """Queries local/cloud security supervisor model to BLOCK or PASS a tool call."""
@@ -363,11 +445,7 @@ def get_mock_openai_response(model: str, messages: list) -> dict:
 @app.post("/v1/messages")
 async def proxy_anthropic(request: Request):
     req_json = await request.json()
-    if req_json.get("stream"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Streaming is not supported by the security middleware proxy."
-        )
+    stream_requested = bool(req_json.get("stream"))
 
     # Context extraction
     user_rule, agent_state = extract_anthropic_context(req_json)
@@ -382,9 +460,22 @@ async def proxy_anthropic(request: Request):
         async with httpx.AsyncClient() as client:
             try:
                 # Forward to configured Upstream Anthropic URL
-                resp = await client.post(f"{UPSTREAM_ANTHROPIC_URL.rstrip('/')}/v1/messages", json=req_json, headers=headers, timeout=60.0)
+                resp = await client.post(
+                    f"{UPSTREAM_ANTHROPIC_URL.rstrip('/')}/v1/messages",
+                    json=req_json,
+                    headers=headers,
+                    timeout=UPSTREAM_TIMEOUT_SECONDS,
+                )
                 if resp.status_code != 200:
                     return JSONResponse(status_code=resp.status_code, content=resp.json())
+                if stream_requested:
+                    logger.info("Buffered upstream Anthropic stream for security inspection")
+                    return await checked_anthropic_stream(
+                        resp.content,
+                        resp.headers.get("content-type", "text/event-stream"),
+                        user_rule,
+                        agent_state,
+                    )
                 resp_data = resp.json()
             except Exception as e:
                 logger.error(f"Error forwarding to Anthropic: {e}")

@@ -8,18 +8,18 @@ The project supports OpenAI-compatible `/v1/chat/completions` and Anthropic-comp
 
 ```text
 Agent client
-    │
-    ▼
+    |
+    v
 FastAPI security proxy (src/middleware.py)
-    │ forwards request
-    ▼
+    | forwards request
+    v
 Upstream LLM provider
-    │ returns a proposed tool call
-    ▼
+    | returns a proposed tool call
+    v
 Local supervisor model in Ollama
-    │
-    ├── PASS  → return the upstream response
-    └── BLOCK → return HTTP 403; the agent never receives the tool call
+    |
+    +-- PASS  -> return the upstream response
+    `-- BLOCK -> return HTTP 403; the agent never receives the tool call
 ```
 
 The supervisor receives the user preferences, extracted agent history, and the proposed action. It is trained to produce only `{"decision": "PASS"}` or `{"decision": "BLOCK"}`. If the supervisor service fails or produces an unparseable response, the proxy blocks the action.
@@ -28,24 +28,24 @@ The supervisor receives the user preferences, extracted agent history, and the p
 
 ```text
 .
-├── src/
-│   └── middleware.py              # FastAPI OpenAI/Anthropic proxy
-├── scripts/
-│   ├── data_pipeline.py           # Builds balanced training/evaluation data
-│   ├── train_supervisor.py        # Full Kaggle/Unsloth fine-tuning run
-│   ├── train_supervisor_smoketest.py
-│   ├── eval_supervisor.py         # Direct Ollama evaluation
-│   ├── test_middleware.py         # Manual end-to-end proxy checks
-│   ├── audit_data.py
-│   └── migrate_classifier_jsonl.py
-├── data/
-│   ├── supervisor_train.jsonl
-│   └── supervisor_eval.jsonl
-├── models/                        # Local GGUF artifacts (git-ignored)
-├── reports/                       # Generated evaluation reports (git-ignored)
-├── Modelfile                      # Ollama model definition
-├── .env.example                   # Environment-variable template
-└── requirements.txt
+|-- src/
+|   `-- middleware.py              # FastAPI OpenAI/Anthropic proxy
+|-- scripts/
+|   |-- data_pipeline.py           # Builds balanced training/evaluation data
+|   |-- train_supervisor.py        # Full Kaggle/Unsloth fine-tuning run
+|   |-- train_supervisor_smoketest.py
+|   |-- eval_supervisor.py         # Direct Ollama evaluation
+|   |-- test_middleware.py         # Manual end-to-end proxy checks
+|   |-- audit_data.py
+|   `-- migrate_classifier_jsonl.py # Local-only legacy migration helper
+|-- data/
+|   |-- supervisor_train.jsonl
+|   `-- supervisor_eval.jsonl
+|-- models/                        # Local GGUF artifacts (git-ignored)
+|-- reports/                       # Generated evaluation reports (git-ignored)
+|-- Modelfile                      # Ollama model definition
+|-- .env.example                   # Environment-variable template
+`-- requirements.txt
 ```
 
 ### Responsibilities
@@ -53,20 +53,20 @@ The supervisor receives the user preferences, extracted agent history, and the p
 | Path | What it does | When to use it |
 | --- | --- | --- |
 | `src/__init__.py` | Marks `src` as a Python package so `src.middleware` can be imported and launched with Uvicorn. | Leave it in place; it has no runtime configuration. |
-| `src/middleware.py` | The production FastAPI application. It forwards OpenAI- and Anthropic-compatible requests, inspects returned tool calls, asks the supervisor for a decision, and returns the upstream response or HTTP 403. | Start the proxy with `uvicorn src.middleware:app --port 8080`. |
+| `src/middleware.py` | The production FastAPI application. It forwards OpenAI- and Anthropic-compatible requests, inspects returned tool calls, asks the supervisor for a decision, and returns the upstream response or HTTP 403. | Start the proxy with `python -m uvicorn src.middleware:app --port 8080`. |
 | `scripts/data_pipeline.py` | Downloads/reads ToolSafe and OpenAgentSafety data, converts it to the supervisor prompt format, balances labels, and writes the train/evaluation JSONL files. | Run when rebuilding `data/` from source datasets. |
 | `scripts/train_supervisor_smoketest.py` | Small Kaggle/Unsloth training run that validates the training, evaluation, and GGUF-export path before an expensive full run. | Run first when changing training code or dependencies. |
 | `scripts/train_supervisor.py` | Full Kaggle/Unsloth fine-tuning workflow. It trains the Gemma supervisor and exports a Q4_K_M GGUF artifact. | Run only for a full model retrain. |
 | `scripts/eval_supervisor.py` | Sends the evaluation set directly to the Ollama supervisor and calculates accuracy, precision, recall, F1, and the confusion matrix. | Use to evaluate a registered supervisor model; writes `reports/eval_results.json`. |
 | `scripts/test_middleware.py` | Manual end-to-end checks of the running proxy, using fixed benign/malicious cases and dataset-driven cases. | Use after starting Ollama and the middleware. |
-| `scripts/audit_data.py` | Read-only integrity and class-balance audit for the JSONL datasets. Health checkpoint| Use after generating or modifying datasets. |
-| `scripts/migrate_classifier_jsonl.py` | Converts existing JSONL rows to the JSON-only `PASS`/`BLOCK` completion format. | Use only when migrating legacy data; it rewrites the data files. |
+| `scripts/audit_data.py` | Read-only integrity and class-balance audit for the JSONL datasets. | Use after generating or modifying datasets. |
+| `scripts/migrate_classifier_jsonl.py` | Local-only legacy helper that converts existing JSONL rows to the JSON-only `PASS`/`BLOCK` completion format. It is git-ignored. | Use only when migrating legacy data; it rewrites the data files. |
 | `data/supervisor_train.jsonl` | Balanced examples used for fine-tuning. | Attach/upload for the full or smoke-test training run. |
 | `data/supervisor_eval.jsonl` | Held-out balanced examples used by the direct evaluation and integration runner. | Do not use for training. |
 | `models/` | Local GGUF model artifacts, including the production and smoke-test models. Git ignores this directory because files are large. | Place or download model artifacts here, then register the production artifact with Ollama. |
 | `reports/` | Generated evaluation JSON reports. Git ignores this directory. | Inspect `eval_results.json` after a direct evaluation. |
-| `docs/session.md` | Development history, decisions, and session-by-session notes. | Reference for prior work and operational context. |
-| `docs/archive/` | Preserved historical instructions and script copies that are not part of the current execution path. | Reference only; do not run these copies as the application. |
+| `docs/session.md` | Local development history, decisions, and session-by-session notes. It is git-ignored. | Reference for prior work and operational context in this working copy. |
+| `docs/archive/` | Local preserved historical instructions and script copies; the directory is git-ignored. | Reference only; do not run these copies as the application. |
 | `Modelfile` | Ollama definition that points at the production GGUF and supplies the required chat template. | Run `ollama create supervisor-proxy -f Modelfile` after replacing the production GGUF. |
 | `.env.example` | Example environment variables for endpoints, model names, and mock mode. | Copy it to `.env` and fill in local values; never commit `.env`. |
 | `requirements.txt` | Runtime and data-pipeline Python dependencies. | Install with `pip install -r requirements.txt`. |
@@ -75,6 +75,7 @@ The supervisor receives the user preferences, extracted agent history, and the p
 
 - Python 3.10 or newer
 - [Ollama](https://ollama.com/) running locally for supervisor inference
+- The [Claude Code CLI](https://code.claude.com/docs/en/overview) for the protected Claude Code workflow
 - The production GGUF in `models/gemma-4-e2b-supervisor.Q4_K_M.gguf`
 
 For dataset generation, install Git and use a network-enabled environment. Fine-tuning is designed for a Kaggle T4 GPU environment with Unsloth; see [Training](#training).
@@ -86,7 +87,7 @@ Create and activate a virtual environment, then install the runtime and data-pip
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Copy `.env.example` to `.env` and set the values for your environment. Do not commit `.env`.
@@ -97,10 +98,11 @@ Register the bundled GGUF with Ollama:
 ollama create supervisor-proxy -f Modelfile
 ```
 
-Start the proxy from the repository root:
+For a generic OpenAI- or Anthropic-compatible client, start the proxy from the
+repository root:
 
 ```powershell
-uvicorn src.middleware:app --host 0.0.0.0 --port 8080
+python -m uvicorn src.middleware:app --host 127.0.0.1 --port 8080
 ```
 
 Point clients to the proxy:
@@ -119,12 +121,79 @@ The proxy loads `.env` from the repository root. These variables are supported:
 | `SUPERVISOR_URL` | `http://localhost:11434` | Ollama or OpenAI-compatible supervisor endpoint |
 | `SUPERVISOR_MODEL` | `supervisor-proxy:latest` | Model used to classify tool calls |
 | `UPSTREAM_OPENAI_URL` | `http://localhost:11434` | OpenAI-compatible upstream base URL |
-| `UPSTREAM_ANTHROPIC_URL` | `https://api.anthropic.com` | Anthropic upstream base URL |
+| `UPSTREAM_ANTHROPIC_URL` | `https://api.anthropic.com` | Anthropic-compatible upstream base URL |
 | `OLLAMA_API_KEY` | empty | Bearer token for remote Ollama-compatible services |
 | `MOCK_UPSTREAM` | `False` | Enable deterministic mock upstream responses for local proxy tests |
+| `UPSTREAM_TIMEOUT_SECONDS` | `120` | Maximum time the proxy waits for an upstream model response |
 | `MIDDLEWARE_PORT` | `8080` | Port used by `python src/middleware.py` |
 
-Streaming requests are intentionally unsupported and receive HTTP 400.
+The Anthropic route supports streamed responses. To ensure a tool call is never
+released before it is inspected, the proxy buffers one complete upstream stream,
+checks every `tool_use` block, then forwards the unchanged stream on `PASS`.
+This adds one-response latency, especially with cloud models.
+
+## Use the proxy with Claude Code and Ollama
+
+`ollama launch claude` connects Claude Code directly to Ollama on port 11434;
+it does not pass through this proxy. Start the proxy and launch Claude Code with
+port 8080 as its Anthropic base URL instead.
+
+### First-time setup
+
+From the repository root, with the virtual environment from Quick Start still
+active, install the Python dependencies and authenticate the local Ollama daemon
+to Ollama Cloud:
+
+```powershell
+python -m pip install -r requirements.txt
+ollama signin
+ollama run gemma4:31b-cloud "Reply with OK only."
+ollama create supervisor-proxy -f Modelfile
+```
+
+If Ollama is not already running as its local service, start it in a separate
+terminal with `ollama serve` before continuing.
+
+Copy `.env.example` to `.env` and set these values:
+
+```dotenv
+SUPERVISOR_URL=http://127.0.0.1:11434
+SUPERVISOR_MODEL=supervisor-proxy:latest
+UPSTREAM_ANTHROPIC_URL=http://127.0.0.1:11434
+UPSTREAM_OPENAI_URL=http://127.0.0.1:11434
+MOCK_UPSTREAM=False
+MIDDLEWARE_PORT=8080
+```
+
+### Run a protected Claude Code session
+
+Open two PowerShell windows in the repository directory.
+
+**Window 1 - start the security proxy and leave it running:**
+
+```powershell
+python -m uvicorn src.middleware:app --host 127.0.0.1 --port 8080
+```
+
+**Window 2 - launch the installed Claude Code CLI through the proxy:**
+
+```powershell
+$env:ANTHROPIC_AUTH_TOKEN = "ollama"
+$env:ANTHROPIC_API_KEY = ""
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
+claude --model gemma4:31b-cloud
+```
+
+The variables in Window 2 apply to that PowerShell session only; repeat them in
+each new terminal that starts Claude Code. In Window 1, each model-proposed
+tool call must produce `Intercepted streamed tool call` followed by a
+`Supervisor decision`. A `BLOCK` produces HTTP 403, so Claude Code does not
+receive the tool call to execute. Do not use `--dangerously-skip-permissions`:
+keep Claude Code's own permission prompts as a second control.
+
+For a quick live check, ask Claude Code to run `git status`. The proxy terminal
+should log the proposed action and its decision before Claude Code runs it.
+
 
 ## Run checks and evaluation
 
@@ -134,7 +203,8 @@ With Ollama and the middleware running:
 # Evaluate direct supervisor decisions against the complete evaluation set.
 python scripts/eval_supervisor.py --model supervisor-proxy
 
-# Exercise the proxy with manual and dataset-driven scenarios.
+# Exercise the proxy with manual and dataset-driven scenarios using Ollama Cloud.
+$env:OPENAI_TEST_MODEL = "gemma4:31b-cloud"
 python scripts/test_middleware.py
 ```
 
@@ -149,7 +219,8 @@ python scripts/data_pipeline.py
 python scripts/audit_data.py
 ```
 
-`scripts/migrate_classifier_jsonl.py` updates existing JSONL records to the JSON-only classifier completion format.
+If available in the local working copy, `scripts/migrate_classifier_jsonl.py`
+updates legacy JSONL records to the JSON-only classifier completion format.
 
 ## Training
 
@@ -228,5 +299,3 @@ The training scripts deliberately constrain visible CUDA devices and contain wor
 - A failed supervisor request is fail-closed: it blocks the proposed action.
 - `allow_origins=["*"]` is currently enabled for dashboard/client compatibility. Restrict CORS origins before exposing the proxy beyond a trusted local network.
 - Classifier results are probabilistic. Review `reports/eval_results.json` and add representative adversarial cases before relying on the proxy in higher-risk environments.
-
-
