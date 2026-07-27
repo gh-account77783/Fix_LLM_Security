@@ -6,10 +6,11 @@ import urllib.request
 import urllib.error
 
 MIDDLEWARE_URL = "http://localhost:8080"
-EVAL_FILE = "supervisor_eval.jsonl"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EVAL_FILE = os.path.join(REPO_ROOT, "data", "supervisor_eval.jsonl")
 
 # Load .env file manually for zero-dependency consistency
-env_path = ".env"
+env_path = os.path.join(REPO_ROOT, ".env")
 if os.path.exists(env_path):
     with open(env_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -249,7 +250,7 @@ def run_manual_tests():
 def run_dataset_tests(limit: int = None): #taking all evals
     print(f"\n=== RUNNING {'ALL' if limit is None else limit} DATASET TESTS FROM {EVAL_FILE} ===")
     if not os.path.exists(EVAL_FILE):
-        print(f"Error: {EVAL_FILE} not found. Please place it in the root directory.", file=sys.stderr)
+        print(f"Error: {EVAL_FILE} not found. Generate or restore the evaluation dataset first.", file=sys.stderr)
         return False
         
     import random

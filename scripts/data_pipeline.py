@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("pipeline")
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = REPO_ROOT / "data"
+
 SYSTEM_PROMPT = (
     "You are a security supervisor for an AI agent's tool execution pipeline. "
     "Analyse the proposed tool call against user preferences and agent state. "
@@ -97,7 +100,7 @@ def _extract(records) -> list[dict]:
 def _toolsafe_github() -> list[dict]:
     """Load ToolSafe from its public GitHub repo (HF version is gated)."""
     import shutil, subprocess, stat
-    dest = Path("_tmp_toolsafe")
+    dest = REPO_ROOT / ".cache" / "toolsafe"
     try:
         if dest.exists():
             shutil.rmtree(dest, onerror=lambda f, p, _: (os.chmod(p, stat.S_IWRITE), f(p)))
@@ -249,12 +252,14 @@ def run_pipeline() -> None:
 
     log.info("Train: %d  |  Eval: %d  (balanced 50/50 each)", len(train), len(eval_))
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     for fname, data in [("supervisor_train.jsonl", train),
                         ("supervisor_eval.jsonl",  eval_)]:
-        with open(fname, "w", encoding="utf-8") as f:
+        output_path = DATA_DIR / fname
+        with output_path.open("w", encoding="utf-8") as f:
             for s in data:
                 f.write(json.dumps(_to_jsonl(**s)) + "\n")
-        log.info("Saved %d records -> %s", len(data), fname)
+        log.info("Saved %d records -> %s", len(data), output_path)
 
     log.info("Phase 1 complete.")
 

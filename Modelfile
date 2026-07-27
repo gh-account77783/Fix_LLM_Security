@@ -1,5 +1,5 @@
 
-FROM ./gemma-4-e2b-supervisor.Q4_K_M.gguf
+FROM ./models/gemma-4-e2b-supervisor.Q4_K_M.gguf
 TEMPLATE """{{- range $i, $_ := .Messages }}
 {{- $last := eq (len (slice $.Messages $i)) 1 }}
 <|turn>{{ .Role }}

@@ -29,6 +29,8 @@ from unsloth import FastLanguageModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("train")
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # ---------------------------------------------------------------------------
 # CustomSFTTrainer
 #
@@ -61,7 +63,7 @@ class CustomSFTTrainer(SFTTrainer):
 
 def find(name: str) -> "str | None":
     """Locate a file under /kaggle/input/ or the working directory."""
-    for p in [*Path("/kaggle/input").rglob(name), Path(name)]:
+    for p in [*Path("/kaggle/input").rglob(name), REPO_ROOT / "data" / name, Path(name)]:
         if p.exists():
             log.info("Found %s at %s", name, p)
             return str(p)

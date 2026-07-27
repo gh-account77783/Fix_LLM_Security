@@ -2,6 +2,7 @@ import os
 import json
 import re
 import logging
+from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -22,8 +23,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load .env file manually to keep it zero-dependency and clean
-env_path = ".env"
+# Load .env file manually to keep it zero-dependency and clean.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+env_path = REPO_ROOT / ".env"
 if os.path.exists(env_path):
     with open(env_path, "r", encoding="utf-8") as f:
         for line in f:
